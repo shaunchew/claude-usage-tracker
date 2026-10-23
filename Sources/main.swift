@@ -44,7 +44,9 @@ if let i = args.firstIndex(of: "--calibrate") {
 // `ClaudeUsage --snapshot out.png [--demo]`: render the panel offscreen to a PNG and exit.
 if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
     let demo = args.contains("--demo")
-    let ok = MainActor.assumeIsolated { renderSnapshot(to: args[i + 1], demo: demo) }
+    // --hover-day N renders the trend tooltip over bar N (0 = oldest), to check its layout.
+    let hover = args.firstIndex(of: "--hover-day").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil }
+    let ok = MainActor.assumeIsolated { renderSnapshot(to: args[i + 1], demo: demo, hoverDay: hover) }
     exit(ok ? 0 : 1)
 }
 

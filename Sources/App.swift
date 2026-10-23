@@ -58,6 +58,8 @@ struct PanelView: View {
     var onHide: () -> Void = {}
     /// Called with the mouse movement since the drag began (nil when it ends).
     var onDrag: (CGSize?) -> Void = { _ in }
+    /// Index of the trend bar under the mouse. Settable so the snapshot can show the tooltip.
+    @State var hoverDay: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -185,13 +187,19 @@ struct PanelView: View {
             HStack(alignment: .bottom, spacing: 3) {
                 ForEach(Array(days.enumerated()), id: \.offset) { i, d in
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(i == days.count - 1 ? Color.orange : Color.white.opacity(0.45))
+                        .fill(i == hoverDay ? Color.white : i == days.count - 1 ? Color.orange : Color.white.opacity(0.45))
                         .frame(height: max(2, 40 * d.weighted / maxV))
                         .frame(maxWidth: .infinity)
-                        .help("\(d.day): \(compact(d.weighted))")
                 }
             }
             .frame(height: 40, alignment: .bottom)
+            .overlay {
+                // ImageRenderer cannot draw AppKit views, so the snapshot leaves the tracker out.
+                if !snapshot { HoverTracker { x in hoverDay = x.map { min(days.count - 1, max(0, Int($0 * Double(days.count)))) } } }
+            }
+            .overlay(alignment: .topLeading) {
+                if let i = hoverDay, days.indices.contains(i) { dayTip(days[i], index: i, count: days.count) }
+            }
             HStack {
                 Text(days.first.map { String($0.day.suffix(5)) } ?? "")
                 Spacer()
@@ -201,6 +209,30 @@ struct PanelView: View {
             }
             .font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    /// Tooltip over the hovered bar: date, weighted and raw tokens. Kept inside the chart's width.
+    private func dayTip(_ d: DayBucket, index: Int, count: Int) -> some View {
+        GeometryReader { g in
+            let tipWidth: CGFloat = 185
+            let center = g.size.width * (CGFloat(index) + 0.5) / CGFloat(count)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(dayLabel(d.day)).font(.caption2.bold())
+                Text("\(compact(d.weighted)) weighted · \(compact(Double(d.raw))) raw").font(.caption2).monospacedDigit()
+            }
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .frame(width: tipWidth, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.85)))
+            .offset(x: min(max(center - tipWidth / 2, 0), g.size.width - tipWidth), y: -30)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func dayLabel(_ day: String) -> String {
+        let p = DateFormatter(); p.dateFormat = "yyyy-MM-dd"
+        guard let d = p.date(from: day) else { return day }
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("EEEdMMM")
+        return f.string(from: d)
     }
 
     private func sessions(_ rows: [SessionRow]) -> some View {
@@ -236,6 +268,34 @@ struct PanelView: View {
 
 /// Green below 75%, amber from 75%, red from 90%.
 func color(_ pct: Double) -> Color { pct >= 90 ? .red : pct >= 75 ? .orange : .green }
+
+/// Reports the mouse's horizontal position (0...1) over the view, or nil when it leaves.
+/// Uses an always-active tracking area because the panel is never the key window, where
+/// SwiftUI hover and .help tooltips do not fire reliably. Clicks and drags pass through.
+struct HoverTracker: NSViewRepresentable {
+    var onMove: (Double?) -> Void
+
+    final class TrackingView: NSView {
+        var onMove: (Double?) -> Void = { _ in }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                           owner: self, userInfo: nil))
+        }
+        private func report(_ e: NSEvent) {
+            let x = convert(e.locationInWindow, from: nil).x
+            onMove(bounds.width > 0 ? Double(x / bounds.width) : nil)
+        }
+        override func mouseEntered(with e: NSEvent) { report(e) }
+        override func mouseMoved(with e: NSEvent) { report(e) }
+        override func mouseExited(with e: NSEvent) { onMove(nil) }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeNSView(context: Context) -> TrackingView { let v = TrackingView(); v.onMove = onMove; return v }
+    func updateNSView(_ v: TrackingView, context: Context) { v.onMove = onMove }
+}
 
 struct VisualEffect: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
@@ -291,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
+        panel.acceptsMouseMovedEvents = true  // for the trend chart tooltip
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         store.alwaysOnTop = alwaysOnTop
         applyLevel()
@@ -425,10 +486,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 // MARK: - Offscreen render for docs/screenshot.png
 
-@MainActor func renderSnapshot(to path: String, demo: Bool) -> Bool {
+@MainActor func renderSnapshot(to path: String, demo: Bool, hoverDay: Int? = nil) -> Bool {
     let store = UsageStore(config: Config.load())
     store.agg = demo ? .demo() : Tracker(config: store.config).update()
-    let renderer = ImageRenderer(content: PanelView(store: store, snapshot: true).padding(20))
+    let renderer = ImageRenderer(content: PanelView(store: store, snapshot: true, hoverDay: hoverDay).padding(20))
     renderer.scale = 2
     guard let cg = renderer.cgImage,
           let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return false }

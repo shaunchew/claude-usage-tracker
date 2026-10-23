@@ -19,7 +19,7 @@ One Swift binary, no dependencies, no network access.
     plan default or one calibrated from your own account.
 - **End-of-week forecast**: the weekly % expected at the reset and, if it would pass 100%,
   when you run out. Colours go amber at 75% and red at 90%.
-- **Last 14 days** (one bar per day) and **top sessions this week** (by weighted usage).
+- **Last 14 days** (one bar per day; hover a bar for its date and token count) and **top sessions this week** (by weighted usage).
 - **Refresh**: automatic every 60 seconds, plus a ↻ button on the panel and a Refresh item
   in the menu bar. The panel shows the time it last updated.
 
