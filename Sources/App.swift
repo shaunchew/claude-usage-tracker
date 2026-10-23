@@ -8,6 +8,8 @@ import SwiftUI
 final class UsageStore: ObservableObject {
     @Published var agg: Aggregates?
     @Published var refreshing = false
+    /// Mirrors the Always on Top setting so the panel's pin button can show it.
+    @Published var alwaysOnTop = false
     let config: Config
     private let tracker: Tracker
     private let queue = DispatchQueue(label: "usage.refresh", qos: .utility)
@@ -52,6 +54,8 @@ struct PanelView: View {
     var snapshot = false
     var onRefresh: () -> Void = {}
     var onCalibrate: () -> Void = {}
+    var onTogglePin: () -> Void = {}
+    var onHide: () -> Void = {}
     /// Called with the mouse movement since the drag began (nil when it ends).
     var onDrag: (CGSize?) -> Void = { _ in }
 
@@ -77,14 +81,16 @@ struct PanelView: View {
     }
 
     @ViewBuilder private func content(_ a: Aggregates) -> some View {
-        HStack(spacing: 8) {
-            Text("Claude usage").font(.headline)
+        HStack(spacing: 4) {
+            Text("Claude usage").font(.headline).lineLimit(1).fixedSize()
             Spacer()
             Text("updated \(hhmm(a.generatedAt))").font(.caption2).foregroundStyle(.secondary).monospacedDigit()
             iconButton("arrow.clockwise", help: "Refresh now", action: onRefresh)
                 .rotationEffect(.degrees(store.refreshing ? 180 : 0))
                 .animation(.easeInOut(duration: 0.4), value: store.refreshing)
             iconButton("slider.horizontal.3", help: "Calibrate from /usage", action: onCalibrate)
+            iconButton(store.alwaysOnTop ? "pin.fill" : "pin", help: store.alwaysOnTop ? "Stop floating above other windows" : "Always on top", action: onTogglePin)
+            iconButton("minus", help: "Hide panel (click the menu-bar icon to bring it back)", action: onHide)
         }
 
         meter(a.fiveHour, resetFormat: "HH:mm")
@@ -98,7 +104,7 @@ struct PanelView: View {
     }
 
     @ViewBuilder private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
-        let icon = Image(systemName: symbol).font(.caption.weight(.semibold)).frame(width: 18, height: 18)
+        let icon = Image(systemName: symbol).font(.caption.weight(.semibold)).frame(width: 17, height: 18)
         // ImageRenderer cannot draw AppKit-backed buttons, so the snapshot shows the bare icon.
         if snapshot { icon.foregroundStyle(.secondary) }
         else { Button(action: action) { icon }.buttonStyle(.borderless).foregroundStyle(.secondary).help(help) }
@@ -250,13 +256,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: NSPanel!
     private var hosting: NSHostingView<PanelView>!
     private var statusItem: NSStatusItem!
+    private let menu = NSMenu()
     private var sub: AnyCancellable?
     private var dragStart: (mouse: NSPoint, origin: NSPoint)?
     private let autosaveName = "ClaudeUsagePanel"
 
+    // Settings kept across restarts (UserDefaults).
     private var alwaysOnTop: Bool {
         get { UserDefaults.standard.object(forKey: "alwaysOnTop") as? Bool ?? config.alwaysOnTop }
-        set { UserDefaults.standard.set(newValue, forKey: "alwaysOnTop") }
+        set { UserDefaults.standard.set(newValue, forKey: "alwaysOnTop"); store.alwaysOnTop = newValue }
+    }
+    /// false = collapsed to the menu bar only.
+    private var panelShown: Bool {
+        get { UserDefaults.standard.object(forKey: "panelShown") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "panelShown") }
+    }
+    private var showInDock: Bool {
+        get { UserDefaults.standard.bool(forKey: "showInDock") }
+        set { UserDefaults.standard.set(newValue, forKey: "showInDock") }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -264,6 +281,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             store: store,
             onRefresh: { [weak self] in self?.refreshNow() },
             onCalibrate: { [weak self] in self?.calibrate() },
+            onTogglePin: { [weak self] in self?.toggleOnTop() },
+            onHide: { [weak self] in self?.setPanel(shown: false) },
             onDrag: { [weak self] d in self?.drag(d) }))
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 310, height: 480),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -273,19 +292,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        store.alwaysOnTop = alwaysOnTop
         applyLevel()
+        applyDockPolicy()
         if !panel.setFrameUsingName(autosaveName), let screen = NSScreen.main?.visibleFrame {
             panel.setFrameTopLeftPoint(NSPoint(x: screen.maxX - 330, y: screen.maxY - 20))
         }
         panel.setFrameAutosaveName(autosaveName)
-        panel.orderFrontRegardless()
+        if panelShown { panel.orderFrontRegardless() }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: "Claude usage")
         statusItem.button?.imagePosition = .imageLeading
-        let menu = NSMenu()
+        // Left-click shows or hides the panel; right-click (or Control-click) opens the menu.
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(statusItemClicked)
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         menu.delegate = self
-        statusItem.menu = menu
 
         sub = store.$agg.receive(on: RunLoop.main).sink { [weak self] a in self?.update(a) }
         store.start()
@@ -295,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let a else { return }
         // Menu bar: "5h% · week%".
         statusItem.button?.title = " \(Int(a.fiveHour.usedPercent.rounded()))% · \(Int(a.weekly.usedPercent.rounded()))%"
-        statusItem.button?.toolTip = "5-hour \(a.fiveHour.source) · weekly \(a.weekly.source)"
+        statusItem.button?.toolTip = "5-hour \(a.fiveHour.source) · weekly \(a.weekly.source). Click to show or hide the panel, right-click for options."
         // Fit the panel to its content, keeping the top-left corner where the user put it.
         let size = hosting.fittingSize
         var frame = panel.frame
@@ -331,12 +354,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let top = menu.addItem(withTitle: "Always on Top", action: #selector(toggleOnTop), keyEquivalent: "")
         top.target = self
         top.state = alwaysOnTop ? .on : .off
+        let dock = menu.addItem(withTitle: "Show in Dock", action: #selector(toggleDock), keyEquivalent: "")
+        dock.target = self
+        dock.state = showInDock ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     }
 
-    @objc private func togglePanel() { panel.isVisible ? panel.orderOut(nil) : panel.orderFrontRegardless() }
+    @objc private func statusItemClicked() {
+        let e = NSApp.currentEvent
+        if e?.type == .rightMouseUp || e?.modifierFlags.contains(.control) == true {
+            // Attach the menu only for this click, so a left-click stays a plain toggle.
+            statusItem.menu = menu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
+        } else {
+            togglePanel()
+        }
+    }
+
+    private func setPanel(shown: Bool) {
+        panelShown = shown
+        shown ? panel.orderFrontRegardless() : panel.orderOut(nil)
+    }
+
+    private func applyDockPolicy() {
+        NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
+    }
+
+    /// Clicking the Dock icon (when shown) brings the panel back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        setPanel(shown: true)
+        return false
+    }
+
+    @objc private func togglePanel() { setPanel(shown: !panel.isVisible) }
     @objc private func toggleOnTop() { alwaysOnTop.toggle(); applyLevel() }
+    @objc private func toggleDock() { showInDock.toggle(); applyDockPolicy() }
     @objc private func refreshNow() { store.refresh() }
 
     /// Asks for the percentages shown by /usage in Claude Code and back-solves the budgets.

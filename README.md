@@ -23,8 +23,13 @@ One Swift binary, no dependencies, no network access.
 - **Refresh**: automatic every 60 seconds, plus a ↻ button on the panel and a Refresh item
   in the menu bar. The panel shows the time it last updated.
 
-The menu-bar item shows `5-hour % · weekly %`. Its menu also has Calibrate, Show/Hide Panel,
-Always on Top and Quit. Drag the panel anywhere; its position is remembered.
+The menu-bar item shows `5-hour % · weekly %`. **Click** it to show or hide the panel, so the
+tracker can sit collapsed in the menu bar. **Right-click** (or Control-click) it for Refresh,
+Calibrate, Always on Top, Show in Dock and Quit. On the panel, the pin button floats it above
+other windows and the minus button collapses it into the menu bar. By default the app has no
+Dock icon; turn on **Show in Dock** if you want one (clicking it brings the panel back).
+Drag the panel anywhere. Its position, Always on Top, shown/collapsed and Show in Dock are all
+remembered across restarts.
 
 ## Install
 
